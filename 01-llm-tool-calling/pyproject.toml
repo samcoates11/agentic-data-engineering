@@ -1,0 +1,27 @@
+[project]
+name = "01-llm-tool-calling"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Sam Coates", email = "samcoatesuk@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "boto3>=1.43.78",
+]
+
+[project.scripts]
+01-llm-tool-calling = "llm_tool_calling.de_agent:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "llm_tool_calling"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
