@@ -1,0 +1,11 @@
+order_id,customer,product,quantity,unit_price,order_date
+1001,Alice Chen,Widget A,3,9.99,2026-01-05
+1002,Bob Singh,Widget B,1,24.50,2026-01-06
+1003,Alice Chen,Widget A,2,9.99,2026-01-07
+1004,Carla Diaz,Widget C,5,4.25,2026-01-07
+1005,,Widget B,2,24.50,2026-01-08
+1006,Bob Singh,Widget A,1,9.99,2026-01-09
+1007,Dan Okafor,Widget C,10,4.25,2026-01-10
+1008,Carla Diaz,Widget B,,24.50,2026-01-11
+1009,Alice Chen,Widget C,4,4.25,2026-01-12
+1010,Dan Okafor,Widget A,2,9.99,2026-01-13

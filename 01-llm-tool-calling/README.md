@@ -4,32 +4,39 @@ First project in the [Agentic Data Engineering](../README.md) portfolio. It's a 
 
 The goal: give an LLM a set of Python functions ("tools") describing what they do and what arguments they take, let the model decide when to call them based on a user's request, execute the calls, and feed the results back so the model can produce a final answer. This is the core loop behind every "agent."
 
+## What it does
+
+A **data inspector agent**: ask natural-language questions about a local CSV/Parquet file, and the model calls tools to list available files, inspect a file's schema (columns, dtypes, null counts), preview sample rows, or summarize a column's values — then answers using what it found, rather than guessing.
+
+```
+$ uv run 01-llm-tool-calling "How many rows are in orders.csv, and are there any missing values?"
+orders.csv has 10 rows. The "customer" and "quantity" columns each have 1 missing value.
+```
+
+This use case is deliberately dependency-free (no warehouse, no cloud resource beyond the Bedrock call itself) so the project stays focused on the tool-calling mechanics. The same four-tool shape — *list things, inspect schema, preview/sample data, summarize a field* — is what projects 02 (Snowflake) and 06 (AWS) are meant to adapt against a real warehouse and cloud services respectively.
+
 ## Status
 
-This project is a working scaffold, not a finished agent. What exists today:
-
-- A confirmed, working connection to AWS and to a Bedrock model via the `boto3` Bedrock Runtime `converse` API ([bedrock_test.py](src/llm_tool_calling/de_agent/bedrock_test.py)).
-- A sanity check that AWS credentials are configured correctly ([aws_test.py](src/llm_tool_calling/de_agent/aws_test.py)).
-- Placeholder modules for the agent loop and its tools ([agent.py](src/llm_tool_calling/de_agent/agent.py), [tools/data_tools.py](src/llm_tool_calling/de_agent/tools/data_tools.py)), not yet implemented.
-
-In other words: the AWS/Bedrock plumbing is proven to work; the actual tool-calling agent loop is the next thing to build on top of it.
+Working end to end at the code level — tool dispatch, error handling, and the model loop are implemented and unit-tested with a mocked Bedrock client (`uv run pytest`). The one thing not yet verified **live** is an actual model response, because this AWS account currently doesn't have Bedrock model access enabled (`ValidationException: Error 002: Access to Bedrock models is not allowed for this account`) — an AWS Support case is the fix, not a code change. Once that clears, `uv run 01-llm-tool-calling "..."` should work immediately with no further changes.
 
 ## How it works (the tool-calling pattern)
 
-Bedrock's `Converse` API supports **tool use**: alongside the conversation messages, you pass a `toolConfig` describing each available tool as a JSON schema (name, description, input parameters). The model can then respond either with a normal text answer, or with a request to invoke one or more tools. The calling code is responsible for:
+Bedrock's `Converse` API supports **tool use**: alongside the conversation messages, you pass a `toolConfig` describing each available tool as a JSON schema (name, description, input parameters). The model can then respond either with a normal text answer, or with a request to invoke one or more tools. [agent.py](src/llm_tool_calling/de_agent/agent.py)'s `ask()` function implements the loop:
 
-1. Sending the user's message plus the tool definitions to the model.
-2. Checking whether the model's response is a tool-use request.
-3. Running the corresponding local Python function with the arguments the model supplied.
-4. Sending the tool's result back to the model as a new message.
-5. Repeating until the model returns a final text answer.
+1. Send the user's question, plus the tool definitions, to the model.
+2. Check `stopReason` on the response — if it isn't `"tool_use"`, return the model's text answer.
+3. Otherwise, for each `toolUse` block in the response, call the matching Python function in `tools/data_tools.py` with the arguments the model supplied (tool errors — bad filename, unknown column — are caught and reported back to the model as a failed `toolResult`, not raised).
+4. Append the tool result(s) to the conversation and go back to step 1.
+5. Give up after `MAX_TURNS` (8) round trips, so a confused model can't loop forever.
 
-For this project, the intended shape is:
+### Files
 
-- **[agent.py](src/llm_tool_calling/de_agent/agent.py)** — the agent loop described above: builds the tool config from the functions in `tools/`, calls Bedrock, dispatches tool calls, and loops until done.
-- **[tools/data_tools.py](src/llm_tool_calling/de_agent/tools/data_tools.py)** — the actual Python functions exposed to the model as tools. Given the portfolio's data engineering focus, these are intended to be things like inspecting a dataset, running a query, validating a schema, etc. (not yet implemented).
-- **[bedrock_test.py](src/llm_tool_calling/de_agent/bedrock_test.py)** — a minimal, standalone example of calling Bedrock's `converse` API (no tools), useful as a reference for the request/response shape.
+- **[agent.py](src/llm_tool_calling/de_agent/agent.py)** — the loop above: builds the `toolConfig` from `TOOL_SPECS`, calls Bedrock, dispatches tool calls, and exposes `ask(question)` plus a CLI `main()` (single question as an argument, or an interactive prompt loop if none given).
+- **[tools/data_tools.py](src/llm_tool_calling/de_agent/tools/data_tools.py)** — the four tool functions (`list_files`, `inspect_schema`, `preview_rows`, `summarize_column`) backed by `pandas`, each paired with its Bedrock tool spec in `TOOL_SPECS`. File access is scoped to `DATA_DIR` (defaults to `./data`, overridable via the `DATA_DIR` env var) and rejects paths that try to escape it.
+- **[bedrock_test.py](src/llm_tool_calling/de_agent/bedrock_test.py)** — a minimal, standalone example of calling Bedrock's `converse` API with no tools; a reference for the request/response shape, independent of the rest of the package.
 - **[aws_test.py](src/llm_tool_calling/de_agent/aws_test.py)** — confirms your local AWS credentials resolve correctly by calling STS `get_caller_identity`.
+- **[data/orders.csv](data/orders.csv)** — a small sample dataset (10 rows, with a couple of deliberately missing values) to try the agent against out of the box.
+- **[tests/](tests/)** — `test_data_tools.py` exercises the tools directly against the sample dataset; `test_agent.py` exercises the tool-dispatch loop (including error handling and the turn-limit guard) against a fake Bedrock client, so the loop logic is verified without needing live AWS access.
 
 ## Project structure
 
@@ -39,29 +46,35 @@ For this project, the intended shape is:
 ├── uv.lock                     # Locked dependency versions
 ├── .python-version             # Pins Python 3.14 for this project
 ├── README.md
+├── data/
+│   └── orders.csv              # Sample dataset the agent can be asked about
+├── tests/
+│   ├── test_data_tools.py      # Unit tests for the tool functions
+│   └── test_agent.py           # Tool-dispatch loop tests, using a fake Bedrock client
 └── src/
     └── llm_tool_calling/        # Importable package (module-name set explicitly in pyproject.toml,
         ├── __init__.py          # since the distribution name "01-llm-tool-calling" isn't a valid Python identifier)
         └── de_agent/
-            ├── __init__.py      # `main()` — the console-script entry point
-            ├── agent.py         # Tool-calling agent loop (placeholder)
+            ├── __init__.py      # Re-exports `agent.main` as the console-script entry point
+            ├── agent.py         # Tool-calling agent loop (ask(), main())
             ├── aws_test.py      # AWS credentials sanity check
             ├── bedrock_test.py  # Minimal Bedrock `converse` API example
             └── tools/
                 ├── __init__.py
-                └── data_tools.py # Tool functions exposed to the model (placeholder)
+                └── data_tools.py # Tool functions + their Bedrock tool specs (TOOL_SPECS)
 ```
 
 ## Prerequisites
 
 - **Python 3.14** (pinned via `.python-version`).
 - **[uv](https://docs.astral.sh/uv/)** for dependency management and running scripts.
-- **An AWS account with Bedrock model access enabled** for the region you intend to use. The example scripts default to:
+- **An AWS account with Bedrock model access enabled** for the region you intend to use. The scripts default to:
   - Region: `eu-west-2`
   - Model: `amazon.nova-micro-v1:0`
 
-  Request access to this model in the [Bedrock console](https://console.aws.amazon.com/bedrock/) under "Model access" if you haven't already, or change `REGION` / `MODEL_ID` in [bedrock_test.py](src/llm_tool_calling/de_agent/bedrock_test.py) to a model/region you do have access to.
-- **AWS credentials configured locally** — via `aws configure`, AWS SSO (`aws sso login`), environment variables, or an assumed role. `boto3` will pick these up automatically through the standard AWS credential chain.
+  AWS has retired the manual "Model access" console page — serverless foundation models now auto-enable on first invocation per account/region. If you still get `ValidationException: Error 002: Access to Bedrock models is not allowed for this account`, that's an account-level restriction (common on new/low-spend accounts); open an AWS Support case (Service: Bedrock) requesting on-demand access — this isn't something fixable from the console or code.
+- **IAM permissions** for the identity you're using: `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream`, `bedrock:Converse`, and `bedrock:ConverseStream` on the model's ARN (plus `bedrock:ListFoundationModels` / `bedrock:GetFoundationModel` if you want to run discovery commands).
+- **AWS credentials configured locally** — via `aws configure`, AWS SSO (`aws sso login`), environment variables, or an assumed role. `boto3` picks these up automatically through the standard AWS credential chain.
 
 ## Setup
 
@@ -72,7 +85,7 @@ From this directory (`01-llm-tool-calling/`):
 uv sync
 ```
 
-This creates a `.venv` and installs everything listed in `pyproject.toml` / `uv.lock` (currently `boto3`, plus `pytest` as a dev dependency).
+This creates a `.venv` and installs everything listed in `pyproject.toml` / `uv.lock` (`boto3`, `pandas`, `pyarrow`, plus `pytest` as a dev dependency).
 
 ## Usage
 
@@ -90,15 +103,25 @@ You should see your AWS account identity (account ID, user/role ARN) printed. If
 uv run python src/llm_tool_calling/de_agent/bedrock_test.py
 ```
 
-This sends a single prompt ("Explain a data pipeline in one sentence.") to the configured Bedrock model and prints its response. If this fails with an access-denied error, double-check model access is enabled for your account in the Bedrock console for the target region.
+This sends a single prompt ("Explain a data pipeline in one sentence.") to the configured Bedrock model and prints its response. If this fails, see the Bedrock access troubleshooting note under Prerequisites above.
 
-### 3. Run the package entry point
+### 3. Ask the data inspector agent a question
 
 ```bash
+# One-off question
+uv run 01-llm-tool-calling "What columns are in orders.csv and which have missing values?"
+
+# Or drop into an interactive prompt
 uv run 01-llm-tool-calling
+> how many unique customers are there?
+> exit
 ```
 
-This currently just prints a hello-world message from [`__init__.py`](src/llm_tool_calling/de_agent/__init__.py) — it will become the entry point for running the full tool-calling agent once `agent.py` and `tools/data_tools.py` are implemented.
+By default it looks in `./data` (the sample `orders.csv` lives there already). Point it at a different folder by setting `DATA_DIR`:
+
+```bash
+DATA_DIR=/path/to/your/csvs uv run 01-llm-tool-calling "describe this data"
+```
 
 ### 4. Run tests
 
@@ -106,13 +129,8 @@ This currently just prints a hello-world message from [`__init__.py`](src/llm_to
 uv run pytest
 ```
 
-(No tests exist yet — `pytest` is set up as a dev dependency for when they're added.)
+Runs the tool-function tests against the sample dataset and the agent loop tests against a fake Bedrock client — no AWS credentials or live access required for `uv run pytest` to pass.
 
-## Next steps for this project
+## Adapting this for a new data source
 
-To turn this into a working tool-calling agent:
-
-1. Implement one or more functions in `tools/data_tools.py` (e.g. a function to list files in a directory, read a CSV's schema, or query a sample dataset), each with a clear docstring/description.
-2. Build a `toolConfig` in `agent.py` from those functions' names, descriptions, and parameters.
-3. Implement the loop in `agent.py`: call `converse` with the tool config → check for a `toolUse` block in the response → execute the matching Python function → send the result back as a `toolResult` message → repeat until the model replies with plain text.
-4. Wire `agent.py` into `__init__.py`'s `main()` so `uv run 01-llm-tool-calling` runs the full agent instead of the hello-world placeholder.
+The pattern to copy for projects 02 (Snowflake) and 06 (AWS): keep `agent.py`'s loop as-is, and swap out `tools/data_tools.py` for a module with the same shape — one function per capability (list, inspect schema, sample/query, summarize), each paired with a `TOOL_SPECS` entry describing it to the model. Everything else (the Converse request/response handling, error-to-tool-result wiring, the turn-limit guard) carries over unchanged.
